@@ -6,363 +6,395 @@ import threading
 from fastmcp import FastMCP
 import httpx
 import os
-from typing import Optional
+from typing import Optional, List
+from dotenv import load_dotenv
+
+load_dotenv()
 
 mcp = FastMCP("TradeTally")
 
 BASE_URL = "https://tradetally.io/api/v1"
+JWT_SECRET = os.environ.get("JWT_SECRET", "")
+
 
 def get_headers() -> dict:
-    token = os.environ.get("JWT_SECRET", "")
     return {
-        "Authorization": f"Bearer {token}",
+        "Authorization": f"Bearer {JWT_SECRET}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
 
 
 @mcp.tool()
-async def get_trades(
-    symbol: Optional[str] = None,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    broker: Optional[str] = None,
-    trade_type: Optional[str] = None,
-    page: int = 1,
-    limit: int = 50,
-) -> dict:
-    """Retrieve a list of trades from the trading journal. Supports filtering by date range, symbol, broker, trade type (options/futures/stocks), and status."""
-    params: dict = {"page": page, "limit": limit}
-    if symbol:
-        params["symbol"] = symbol
-    if start_date:
-        params["start_date"] = start_date
-    if end_date:
-        params["end_date"] = end_date
-    if broker:
-        params["broker"] = broker
-    if trade_type:
-        params["trade_type"] = trade_type
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(
-            f"{BASE_URL}/trades",
-            headers=get_headers(),
-            params=params,
-        )
-        if response.status_code >= 400:
-            return {"error": f"HTTP {response.status_code}", "detail": response.text}
-        return response.json()
-
-
-@mcp.tool()
 async def import_trades(
-    broker: str,
     file_path: str,
+    broker: str,
     account_id: Optional[str] = None,
 ) -> dict:
-    """Import trades from a broker CSV file into the trading journal. Handles CSV mapping and CUSIP resolution automatically."""
-    headers = get_headers()
-    # Remove Content-Type for multipart upload
-    headers.pop("Content-Type", None)
+    """Import trades from a CSV file exported by a supported broker (Lightspeed, Charles Schwab, ThinkorSwim, IBKR, E*TRADE, ProjectX). Use this when the user wants to upload trade history from their brokerage account."""
+    try:
+        resolved_path = os.path.expanduser(file_path)
+        if not os.path.exists(resolved_path):
+            return {"error": f"File not found: {resolved_path}"}
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        # Determine if file_path is a URL or a local path
-        if file_path.startswith("http://") or file_path.startswith("https://"):
-            # Download the file first
-            file_response = await client.get(file_path)
-            if file_response.status_code >= 400:
-                return {"error": f"Failed to download file: HTTP {file_response.status_code}"}
-            file_content = file_response.content
-            filename = file_path.split("/")[-1] or "trades.csv"
-        else:
-            try:
-                with open(file_path, "rb") as f:
-                    file_content = f.read()
-                filename = os.path.basename(file_path)
-            except FileNotFoundError:
-                return {"error": f"File not found: {file_path}"}
-            except Exception as e:
-                return {"error": f"Failed to read file: {str(e)}"}
+        with open(resolved_path, "rb") as f:
+            file_content = f.read()
+
+        file_name = os.path.basename(resolved_path)
 
         data = {"broker": broker}
         if account_id:
             data["account_id"] = account_id
 
-        files = {"file": (filename, file_content, "text/csv")}
-
-        response = await client.post(
-            f"{BASE_URL}/trades/import",
-            headers=headers,
-            data=data,
-            files=files,
-        )
-        if response.status_code >= 400:
-            return {"error": f"HTTP {response.status_code}", "detail": response.text}
-        return response.json()
-
-
-@mcp.tool()
-async def get_analytics(
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    group_by: str = "day",
-    trade_type: Optional[str] = None,
-    symbol: Optional[str] = None,
-) -> dict:
-    """Retrieve performance analytics and statistics for trades. Provides aggregated metrics including P&L, win rate, average hold time, and performance by day of week, sector, or time period."""
-    params: dict = {"group_by": group_by}
-    if start_date:
-        params["start_date"] = start_date
-    if end_date:
-        params["end_date"] = end_date
-    if trade_type:
-        params["trade_type"] = trade_type
-    if symbol:
-        params["symbol"] = symbol
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(
-            f"{BASE_URL}/analytics",
-            headers=get_headers(),
-            params=params,
-        )
-        if response.status_code >= 400:
-            return {"error": f"HTTP {response.status_code}", "detail": response.text}
-        return response.json()
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{BASE_URL}/trades/import",
+                headers={
+                    "Authorization": f"Bearer {JWT_SECRET}",
+                    "Accept": "application/json",
+                },
+                data=data,
+                files={"file": (file_name, file_content, "text/csv")},
+            )
+            if response.status_code >= 400:
+                return {
+                    "error": f"API request failed with status {response.status_code}",
+                    "detail": response.text,
+                }
+            return response.json()
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @mcp.tool()
-async def get_ai_insights(
-    analysis_type: str = "general",
+async def get_trade_analytics(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    prompt: Optional[str] = None,
+    account_id: Optional[str] = None,
+    group_by: Optional[str] = "day",
 ) -> dict:
-    """Get AI-powered trading recommendations and behavioral analysis powered by Google Gemini. Includes revenge trading detection, overtrading analysis, and actionable suggestions."""
-    payload: dict = {"analysis_type": analysis_type}
-    if start_date:
-        payload["start_date"] = start_date
-    if end_date:
-        payload["end_date"] = end_date
-    if prompt:
-        payload["prompt"] = prompt
+    """Retrieve performance analytics and statistics for trades over a given date range. Use this when the user wants to understand their trading performance, win rate, P&L breakdown, or behavioral patterns like revenge trading."""
+    try:
+        params = {}
+        if start_date:
+            params["start_date"] = start_date
+        if end_date:
+            params["end_date"] = end_date
+        if account_id:
+            params["account_id"] = account_id
+        if group_by:
+            params["group_by"] = group_by
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(
-            f"{BASE_URL}/ai/insights",
-            headers=get_headers(),
-            json=payload,
-        )
-        if response.status_code >= 400:
-            # Try GET as fallback
-            params: dict = {"analysis_type": analysis_type}
-            if start_date:
-                params["start_date"] = start_date
-            if end_date:
-                params["end_date"] = end_date
-            if prompt:
-                params["prompt"] = prompt
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(
-                f"{BASE_URL}/ai/insights",
+                f"{BASE_URL}/analytics",
                 headers=get_headers(),
                 params=params,
             )
             if response.status_code >= 400:
-                return {"error": f"HTTP {response.status_code}", "detail": response.text}
-        return response.json()
-
-
-@mcp.tool()
-async def get_year_wrapped(year: int) -> dict:
-    """Retrieve the annual Year Wrapped summary report for a given year, similar to Spotify Wrapped but for trading. Includes top symbols, best days, biggest wins/losses, and key stats."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(
-            f"{BASE_URL}/analytics/year-wrapped/{year}",
-            headers=get_headers(),
-        )
-        if response.status_code >= 400:
-            # Try alternative endpoint
-            response = await client.get(
-                f"{BASE_URL}/year-wrapped/{year}",
-                headers=get_headers(),
-            )
-            if response.status_code >= 400:
-                return {"error": f"HTTP {response.status_code}", "detail": response.text}
-        return response.json()
-
-
-@mcp.tool()
-async def manage_api_keys(
-    action: str,
-    key_name: Optional[str] = None,
-    key_id: Optional[str] = None,
-) -> dict:
-    """Create, list, or revoke API keys for programmatic access to TradeTally. Actions: create, list, revoke."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        if action == "list":
-            response = await client.get(
-                f"{BASE_URL}/api-keys",
-                headers=get_headers(),
-            )
-            if response.status_code >= 400:
-                return {"error": f"HTTP {response.status_code}", "detail": response.text}
+                return {
+                    "error": f"API request failed with status {response.status_code}",
+                    "detail": response.text,
+                }
             return response.json()
+    except Exception as e:
+        return {"error": str(e)}
 
-        elif action == "create":
-            if not key_name:
-                return {"error": "key_name is required when action is 'create'"}
-            payload = {"name": key_name}
+
+@mcp.tool()
+async def get_ai_insights(
+    analysis_type: Optional[str] = "general",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    prompt: Optional[str] = None,
+) -> dict:
+    """Get AI-powered personalized trading recommendations and behavioral analysis powered by Google Gemini. Use this when the user wants actionable suggestions to improve their trading strategy or understand their patterns."""
+    try:
+        payload = {}
+        if analysis_type:
+            payload["analysis_type"] = analysis_type
+        if start_date:
+            payload["start_date"] = start_date
+        if end_date:
+            payload["end_date"] = end_date
+        if prompt:
+            payload["prompt"] = prompt
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
-                f"{BASE_URL}/api-keys",
+                f"{BASE_URL}/ai/insights",
                 headers=get_headers(),
                 json=payload,
             )
             if response.status_code >= 400:
-                return {"error": f"HTTP {response.status_code}", "detail": response.text}
+                return {
+                    "error": f"API request failed with status {response.status_code}",
+                    "detail": response.text,
+                }
             return response.json()
-
-        elif action == "revoke":
-            if not key_id:
-                return {"error": "key_id is required when action is 'revoke'"}
-            response = await client.delete(
-                f"{BASE_URL}/api-keys/{key_id}",
-                headers=get_headers(),
-            )
-            if response.status_code >= 400:
-                return {"error": f"HTTP {response.status_code}", "detail": response.text}
-            if response.status_code == 204:
-                return {"message": f"API key {key_id} revoked successfully"}
-            return response.json()
-
-        else:
-            return {"error": f"Unknown action '{action}'. Valid actions: create, list, revoke"}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @mcp.tool()
-async def manage_account(
+async def manage_api_key(
     action: str,
-    display_name: Optional[str] = None,
-    email: Optional[str] = None,
-    timezone: Optional[str] = None,
-    current_password: Optional[str] = None,
-    new_password: Optional[str] = None,
+    key_id: Optional[str] = None,
+    label: Optional[str] = None,
+    scopes: Optional[List[str]] = None,
 ) -> dict:
-    """View or update the authenticated user's account settings including profile information, timezone, broker connections, and notification preferences."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        if action == "get":
-            response = await client.get(
-                f"{BASE_URL}/users/profile",
-                headers=get_headers(),
-            )
-            if response.status_code >= 400:
-                return {"error": f"HTTP {response.status_code}", "detail": response.text}
-            return response.json()
-
-        elif action == "update":
-            payload: dict = {}
-            if display_name is not None:
-                payload["display_name"] = display_name
-            if email is not None:
-                payload["email"] = email
-            if timezone is not None:
-                payload["timezone"] = timezone
-
-            results = {}
-
-            # Update profile if there are profile fields
-            if payload:
-                response = await client.put(
-                    f"{BASE_URL}/users/profile",
+    """Create, list, revoke, or rotate API keys for programmatic access to TradeTally. Use this when the user wants to integrate with external tools, set up automation, or manage their API credentials."""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            if action == "list":
+                response = await client.get(
+                    f"{BASE_URL}/api-keys",
+                    headers=get_headers(),
+                )
+            elif action == "create":
+                payload = {}
+                if label:
+                    payload["name"] = label
+                if scopes:
+                    payload["scopes"] = scopes
+                response = await client.post(
+                    f"{BASE_URL}/api-keys",
                     headers=get_headers(),
                     json=payload,
                 )
-                if response.status_code >= 400:
-                    return {"error": f"HTTP {response.status_code}", "detail": response.text}
-                results["profile"] = response.json()
-
-            # Update password separately if requested
-            if current_password and new_password:
-                password_payload = {
-                    "current_password": current_password,
-                    "new_password": new_password,
-                }
-                pwd_response = await client.put(
-                    f"{BASE_URL}/users/password",
+            elif action == "revoke":
+                if not key_id:
+                    return {"error": "key_id is required for revoke action"}
+                response = await client.delete(
+                    f"{BASE_URL}/api-keys/{key_id}",
                     headers=get_headers(),
-                    json=password_payload,
                 )
-                if pwd_response.status_code >= 400:
-                    results["password_error"] = {
-                        "error": f"HTTP {pwd_response.status_code}",
-                        "detail": pwd_response.text,
-                    }
-                else:
-                    results["password"] = pwd_response.json() if pwd_response.text else {"message": "Password updated successfully"}
+            elif action == "rotate":
+                if not key_id:
+                    return {"error": "key_id is required for rotate action"}
+                response = await client.post(
+                    f"{BASE_URL}/api-keys/{key_id}/rotate",
+                    headers=get_headers(),
+                )
+            else:
+                return {"error": f"Unknown action: {action}. Valid options: create, list, revoke, rotate"}
 
-            if not results:
-                return {"message": "No fields provided to update"}
-            return results
+            if response.status_code >= 400:
+                return {
+                    "error": f"API request failed with status {response.status_code}",
+                    "detail": response.text,
+                }
+            if response.status_code == 204 or not response.content:
+                return {"success": True, "action": action}
+            return response.json()
+    except Exception as e:
+        return {"error": str(e)}
 
-        else:
-            return {"error": f"Unknown action '{action}'. Valid actions: get, update"}
+
+@mcp.tool()
+async def get_year_wrapped(
+    year: Optional[int] = None,
+    account_id: Optional[str] = None,
+) -> dict:
+    """Retrieve the annual 'Year Wrapped' summary — a highlights reel of the user's trading year including best/worst trades, most traded symbols, P&L milestones, and key stats. Use this when the user wants a yearly recap of their trading activity."""
+    try:
+        params = {}
+        if year:
+            params["year"] = year
+        if account_id:
+            params["account_id"] = account_id
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{BASE_URL}/analytics/year-wrapped",
+                headers=get_headers(),
+                params=params,
+            )
+            if response.status_code >= 400:
+                return {
+                    "error": f"API request failed with status {response.status_code}",
+                    "detail": response.text,
+                }
+            return response.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def manage_csv_mapping(
+    action: str,
+    mapping_id: Optional[str] = None,
+    broker_name: Optional[str] = None,
+    column_map: Optional[List[dict]] = None,
+) -> dict:
+    """Create, update, list, or delete custom CSV column mappings for brokers not natively supported. Use this when the user wants to import trades from an unsupported broker or has a custom CSV format."""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            if action == "list":
+                response = await client.get(
+                    f"{BASE_URL}/csv-mappings",
+                    headers=get_headers(),
+                )
+            elif action == "create":
+                if not broker_name:
+                    return {"error": "broker_name is required for create action"}
+                payload = {"broker_name": broker_name}
+                if column_map:
+                    payload["column_map"] = column_map
+                response = await client.post(
+                    f"{BASE_URL}/csv-mappings",
+                    headers=get_headers(),
+                    json=payload,
+                )
+            elif action == "update":
+                if not mapping_id:
+                    return {"error": "mapping_id is required for update action"}
+                payload = {}
+                if broker_name:
+                    payload["broker_name"] = broker_name
+                if column_map:
+                    payload["column_map"] = column_map
+                response = await client.put(
+                    f"{BASE_URL}/csv-mappings/{mapping_id}",
+                    headers=get_headers(),
+                    json=payload,
+                )
+            elif action == "delete":
+                if not mapping_id:
+                    return {"error": "mapping_id is required for delete action"}
+                response = await client.delete(
+                    f"{BASE_URL}/csv-mappings/{mapping_id}",
+                    headers=get_headers(),
+                )
+            else:
+                return {"error": f"Unknown action: {action}. Valid options: create, list, update, delete"}
+
+            if response.status_code >= 400:
+                return {
+                    "error": f"API request failed with status {response.status_code}",
+                    "detail": response.text,
+                }
+            if response.status_code == 204 or not response.content:
+                return {"success": True, "action": action}
+            return response.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def lookup_cusip(
+    cusip: Optional[str] = None,
+    symbol: Optional[str] = None,
+    action: Optional[str] = "lookup",
+) -> dict:
+    """Look up or resolve CUSIP-to-symbol mappings used for translating broker trade exports that reference securities by CUSIP instead of ticker symbol. Use this when imported trades show CUSIP codes instead of recognizable ticker symbols."""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            if action == "list":
+                response = await client.get(
+                    f"{BASE_URL}/cusip-mappings",
+                    headers=get_headers(),
+                )
+            elif action == "lookup":
+                params = {}
+                if cusip:
+                    params["cusip"] = cusip
+                if symbol:
+                    params["symbol"] = symbol
+                if not params:
+                    return {"error": "Either cusip or symbol must be provided for lookup action"}
+                response = await client.get(
+                    f"{BASE_URL}/cusip-mappings/lookup",
+                    headers=get_headers(),
+                    params=params,
+                )
+            elif action == "add":
+                if not cusip or not symbol:
+                    return {"error": "Both cusip and symbol are required for add action"}
+                payload = {"cusip": cusip, "symbol": symbol}
+                response = await client.post(
+                    f"{BASE_URL}/cusip-mappings",
+                    headers=get_headers(),
+                    json=payload,
+                )
+            else:
+                return {"error": f"Unknown action: {action}. Valid options: lookup, add, list"}
+
+            if response.status_code >= 400:
+                return {
+                    "error": f"API request failed with status {response.status_code}",
+                    "detail": response.text,
+                }
+            if response.status_code == 204 or not response.content:
+                return {"success": True, "action": action}
+            return response.json()
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @mcp.tool()
 async def admin_manage_users(
     action: str,
     user_id: Optional[str] = None,
-    status_filter: Optional[str] = None,
-    page: int = 1,
+    filter: Optional[str] = "all",
+    page: Optional[int] = 1,
 ) -> dict:
-    """Admin-only tool to manage user accounts on the TradeTally instance. Actions: list_users, approve_user, suspend_user, get_stats. Requires admin privileges."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        if action == "list_users":
-            params: dict = {"page": page}
-            if status_filter:
-                params["status"] = status_filter
-            response = await client.get(
-                f"{BASE_URL}/admin/users",
-                headers=get_headers(),
-                params=params,
-            )
+    """Admin-only tool to manage user accounts: list users, approve pending registrations, disable/enable accounts, or view platform-wide usage stats. Use this when an admin needs to manage the TradeTally instance's user base."""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            if action == "list":
+                params = {"filter": filter or "all", "page": page or 1}
+                response = await client.get(
+                    f"{BASE_URL}/admin/users",
+                    headers=get_headers(),
+                    params=params,
+                )
+            elif action == "stats":
+                response = await client.get(
+                    f"{BASE_URL}/admin/stats",
+                    headers=get_headers(),
+                )
+            elif action == "approve":
+                if not user_id:
+                    return {"error": "user_id is required for approve action"}
+                response = await client.post(
+                    f"{BASE_URL}/admin/users/{user_id}/approve",
+                    headers=get_headers(),
+                )
+            elif action == "disable":
+                if not user_id:
+                    return {"error": "user_id is required for disable action"}
+                response = await client.post(
+                    f"{BASE_URL}/admin/users/{user_id}/disable",
+                    headers=get_headers(),
+                )
+            elif action == "enable":
+                if not user_id:
+                    return {"error": "user_id is required for enable action"}
+                response = await client.post(
+                    f"{BASE_URL}/admin/users/{user_id}/enable",
+                    headers=get_headers(),
+                )
+            elif action == "delete":
+                if not user_id:
+                    return {"error": "user_id is required for delete action"}
+                response = await client.delete(
+                    f"{BASE_URL}/admin/users/{user_id}",
+                    headers=get_headers(),
+                )
+            else:
+                return {"error": f"Unknown action: {action}. Valid options: list, approve, disable, enable, delete, stats"}
+
             if response.status_code >= 400:
-                return {"error": f"HTTP {response.status_code}", "detail": response.text}
+                return {
+                    "error": f"API request failed with status {response.status_code}",
+                    "detail": response.text,
+                }
+            if response.status_code == 204 or not response.content:
+                return {"success": True, "action": action}
             return response.json()
-
-        elif action == "approve_user":
-            if not user_id:
-                return {"error": "user_id is required for approve_user action"}
-            response = await client.post(
-                f"{BASE_URL}/admin/users/{user_id}/approve",
-                headers=get_headers(),
-            )
-            if response.status_code >= 400:
-                return {"error": f"HTTP {response.status_code}", "detail": response.text}
-            return response.json() if response.text else {"message": f"User {user_id} approved successfully"}
-
-        elif action == "suspend_user":
-            if not user_id:
-                return {"error": "user_id is required for suspend_user action"}
-            response = await client.post(
-                f"{BASE_URL}/admin/users/{user_id}/suspend",
-                headers=get_headers(),
-            )
-            if response.status_code >= 400:
-                return {"error": f"HTTP {response.status_code}", "detail": response.text}
-            return response.json() if response.text else {"message": f"User {user_id} suspended successfully"}
-
-        elif action == "get_stats":
-            response = await client.get(
-                f"{BASE_URL}/admin/stats",
-                headers=get_headers(),
-            )
-            if response.status_code >= 400:
-                return {"error": f"HTTP {response.status_code}", "detail": response.text}
-            return response.json()
-
-        else:
-            return {"error": f"Unknown action '{action}'. Valid actions: list_users, approve_user, suspend_user, get_stats"}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 
