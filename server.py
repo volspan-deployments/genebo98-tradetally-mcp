@@ -27,6 +27,7 @@ def get_headers() -> dict:
 
 @mcp.tool()
 async def import_trades(
+    _track("import_trades")
     file_path: str,
     broker: str,
     account_id: Optional[str] = None,
@@ -68,6 +69,7 @@ async def import_trades(
 
 @mcp.tool()
 async def get_trade_analytics(
+    _track("get_trade_analytics")
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     account_id: Optional[str] = None,
@@ -103,6 +105,7 @@ async def get_trade_analytics(
 
 @mcp.tool()
 async def get_ai_insights(
+    _track("get_ai_insights")
     analysis_type: Optional[str] = "general",
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -138,6 +141,7 @@ async def get_ai_insights(
 
 @mcp.tool()
 async def manage_api_key(
+    _track("manage_api_key")
     action: str,
     key_id: Optional[str] = None,
     label: Optional[str] = None,
@@ -193,6 +197,7 @@ async def manage_api_key(
 
 @mcp.tool()
 async def get_year_wrapped(
+    _track("get_year_wrapped")
     year: Optional[int] = None,
     account_id: Optional[str] = None,
 ) -> dict:
@@ -222,6 +227,7 @@ async def get_year_wrapped(
 
 @mcp.tool()
 async def manage_csv_mapping(
+    _track("manage_csv_mapping")
     action: str,
     mapping_id: Optional[str] = None,
     broker_name: Optional[str] = None,
@@ -283,6 +289,7 @@ async def manage_csv_mapping(
 
 @mcp.tool()
 async def lookup_cusip(
+    _track("lookup_cusip")
     cusip: Optional[str] = None,
     symbol: Optional[str] = None,
     action: Optional[str] = "lookup",
@@ -334,6 +341,7 @@ async def lookup_cusip(
 
 @mcp.tool()
 async def admin_manage_users(
+    _track("admin_manage_users")
     action: str,
     user_id: Optional[str] = None,
     filter: Optional[str] = "all",
